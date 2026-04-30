@@ -1,0 +1,24 @@
+"""Scoring function enum used by the MoE gating kernels.
+
+Pure Python; the actual FlyDSL translation of `softplus` is inlined inside
+each kernel because FlyDSL has no `@T.macro` equivalent.
+"""
+
+from enum import IntEnum
+
+
+class ScoringFunc(IntEnum):
+    SIGMOID = 0
+    SQRTSOFTPLUS = 1
+    SOFTMAX = 2
+    IDENTITY = 3
+
+    def __str__(self):
+        return self.name.lower()
+
+    @classmethod
+    def from_str(cls, label: str):
+        try:
+            return cls[label.upper()]
+        except KeyError:
+            raise ValueError(f'{label} is not a valid {cls.__name__}')

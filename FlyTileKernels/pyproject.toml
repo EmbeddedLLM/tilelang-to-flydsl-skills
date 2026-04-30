@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools", "wheel", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+version_file = "fly_tile_kernels/_version.py"
+
+[project]
+name = "fly_tile_kernels"
+dynamic = ["version"]
+description = "TileKernels reimplemented on FlyDSL for AMD ROCm (gfx950 target)."
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "FlyTileKernels contributors" },
+]
+dependencies = [
+    "torch>=2.4",
+    "flydsl",
+]
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+dev = ["setuptools", "wheel", "setuptools-scm>=8", "pytest", "pytest-xdist", "pytest-repeat"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["fly_tile_kernels*"]
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["Q000"]
+fixable = ["Q000"]
+
+[tool.ruff.lint.flake8-quotes]
+inline-quotes = "single"
