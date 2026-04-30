@@ -2,8 +2,8 @@ from typing import Callable
 
 import pytest
 import torch
-from fly_fly_tile_kernels.modeling.mhc.ops import sinkhorn_normalize
-from fly_fly_tile_kernels.torch.mhc import sinkhorn_normalize_ref
+from fly_tile_kernels.modeling.mhc.ops import sinkhorn_normalize
+from fly_tile_kernels.torch.mhc import sinkhorn_normalize_ref
 
 
 def generate_sinkhorn_test_data(

@@ -2,8 +2,8 @@ from typing import Callable
 
 import pytest
 import torch
-from fly_fly_tile_kernels.modeling.mhc.ops import expand_to_mhc
-from fly_fly_tile_kernels.torch.mhc import expand_to_mhc_ref
+from fly_tile_kernels.modeling.mhc.ops import expand_to_mhc
+from fly_tile_kernels.torch.mhc import expand_to_mhc_ref
 
 
 def generate_expand_test_data(

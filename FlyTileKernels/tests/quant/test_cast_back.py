@@ -3,9 +3,9 @@ import pytest
 import torch
 
 import fly_tile_kernels
-from fly_fly_tile_kernels.testing.bench import dtype_to_str, make_param_id
-from fly_fly_tile_kernels.testing.generator import generate_hidden_sizes, generate_num_tokens
-from fly_fly_tile_kernels.testing.numeric import assert_equal, calc_diff, count_bytes
+from fly_tile_kernels.testing.bench import dtype_to_str, make_param_id
+from fly_tile_kernels.testing.generator import generate_hidden_sizes, generate_num_tokens
+from fly_tile_kernels.testing.numeric import assert_equal, calc_diff, count_bytes
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'

@@ -1,7 +1,7 @@
 import pytest
 import torch
-from fly_fly_tile_kernels.modeling.mhc.ops import mhc_pre_norm_fn
-from fly_fly_tile_kernels.torch.mhc import mhc_pre_norm_fn_ref
+from fly_tile_kernels.modeling.mhc.ops import mhc_pre_norm_fn
+from fly_tile_kernels.torch.mhc import mhc_pre_norm_fn_ref
 
 
 def generate_norm_fn_test_data(

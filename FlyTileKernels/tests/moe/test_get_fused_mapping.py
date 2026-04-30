@@ -5,10 +5,10 @@ import pytest
 import torch
 
 import fly_tile_kernels
-from fly_fly_tile_kernels.config import set_num_sms
-from fly_fly_tile_kernels.testing.generator import generate_topk_idx, generate_moe_params, generate_num_sms
-from fly_fly_tile_kernels.testing.numeric import count_bytes
-from fly_fly_tile_kernels.testing.bench import make_param_id
+from fly_tile_kernels.config import set_num_sms
+from fly_tile_kernels.testing.generator import generate_topk_idx, generate_moe_params, generate_num_sms
+from fly_tile_kernels.testing.numeric import count_bytes
+from fly_tile_kernels.testing.bench import make_param_id
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'

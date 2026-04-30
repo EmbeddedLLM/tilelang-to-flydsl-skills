@@ -3,12 +3,12 @@ import pytest
 import torch
 
 import fly_tile_kernels
-from fly_fly_tile_kernels.testing import clear_unused_sf
-from fly_fly_tile_kernels.torch import swiglu_forward, cast
-from fly_fly_tile_kernels.config import set_num_sms
-from fly_fly_tile_kernels.testing.generator import generate_topk_idx, generate_hidden_sizes, generate_moe_params, generate_num_sms
-from fly_fly_tile_kernels.testing.numeric import assert_equal, count_bytes
-from fly_fly_tile_kernels.testing.bench import make_param_id
+from fly_tile_kernels.testing import clear_unused_sf
+from fly_tile_kernels.torch import swiglu_forward, cast
+from fly_tile_kernels.config import set_num_sms
+from fly_tile_kernels.testing.generator import generate_topk_idx, generate_hidden_sizes, generate_moe_params, generate_num_sms
+from fly_tile_kernels.testing.numeric import assert_equal, count_bytes
+from fly_tile_kernels.testing.bench import make_param_id
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'

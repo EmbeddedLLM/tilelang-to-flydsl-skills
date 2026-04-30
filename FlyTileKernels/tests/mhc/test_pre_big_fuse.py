@@ -1,6 +1,6 @@
 import pytest
 import torch
-from fly_fly_tile_kernels.modeling.mhc.ops import (
+from fly_tile_kernels.modeling.mhc.ops import (
     mhc_pre_apply_mix,
     mhc_pre_big_fuse,
     mhc_pre_norm_fn,

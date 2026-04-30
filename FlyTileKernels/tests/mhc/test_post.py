@@ -2,8 +2,8 @@ from typing import Callable
 
 import pytest
 import torch
-from fly_fly_tile_kernels.modeling.mhc.ops import mhc_post
-from fly_fly_tile_kernels.torch.mhc import mhc_post_ref
+from fly_tile_kernels.modeling.mhc.ops import mhc_post
+from fly_tile_kernels.torch.mhc import mhc_post_ref
 
 
 def generate_mhc_post_test_data(

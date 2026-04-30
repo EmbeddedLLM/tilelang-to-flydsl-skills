@@ -4,10 +4,10 @@ import torch
 import pytest
 
 import fly_tile_kernels
-from fly_fly_tile_kernels.testing.generator import generate_topk_idx, generate_moe_params
-from fly_fly_tile_kernels.testing.numeric import assert_equal, count_bytes
-from fly_fly_tile_kernels.torch import normalize_weight as torch_normalize_weight
-from fly_fly_tile_kernels.testing.bench import make_param_id
+from fly_tile_kernels.testing.generator import generate_topk_idx, generate_moe_params
+from fly_tile_kernels.testing.numeric import assert_equal, count_bytes
+from fly_tile_kernels.torch import normalize_weight as torch_normalize_weight
+from fly_tile_kernels.testing.bench import make_param_id
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'

@@ -2,11 +2,11 @@ import os
 import pytest
 import torch
 
-from fly_fly_tile_kernels.engram import engram_gate_bwd
-from fly_fly_tile_kernels.torch.engram import engram_gate_ref
-from fly_fly_tile_kernels.testing.numeric import calc_diff, count_bytes
-from fly_fly_tile_kernels.testing.generator import generate_hidden_sizes, generate_num_tokens
-from fly_fly_tile_kernels.testing.bench import make_param_id
+from fly_tile_kernels.engram import engram_gate_bwd
+from fly_tile_kernels.torch.engram import engram_gate_ref
+from fly_tile_kernels.testing.numeric import calc_diff, count_bytes
+from fly_tile_kernels.testing.generator import generate_hidden_sizes, generate_num_tokens
+from fly_tile_kernels.testing.bench import make_param_id
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'

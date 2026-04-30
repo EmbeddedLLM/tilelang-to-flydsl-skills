@@ -88,29 +88,72 @@ def torch_dtype_str(dtype: torch.dtype) -> str:
 # ---------------------------------------------------------------------------
 
 def pick_buffer_copy_atom(elem_dt, vec_width: int):
-    """Return a (CopyOp, n_atom_calls) pair sized to vec_width * elem_bits.
+    """Return a (atom_factory, n_atom_calls) pair sized to vec_width * elem_bits.
 
-    Caller invokes the atom n_atom_calls times to cover the full vector.
+    `atom_factory` is the unbound `fx.rocdl.BufferCopyNb` constructor; the
+    caller MUST invoke it (e.g. ``atom_factory()``) inside an MLIR context
+    (i.e. inside the `@flyc.kernel` body).  Constructing the atom outside a
+    context raises a context-missing error.
+
+    Caller invokes the atom `n_atom_calls` times to cover the full vector.
     The atom always emits a single 32/64/128-bit AMD `buffer_load`/store.
     """
     bits = vec_width * elem_dt.width
     if bits == 16:
-        return fx.rocdl.BufferCopy16b(), 1
+        return fx.rocdl.BufferCopy16b, 1
     if bits == 32:
-        return fx.rocdl.BufferCopy32b(), 1
+        return fx.rocdl.BufferCopy32b, 1
     if bits == 64:
-        return fx.rocdl.BufferCopy64b(), 1
+        return fx.rocdl.BufferCopy64b, 1
     if bits == 128:
-        return fx.rocdl.BufferCopy128b(), 1
+        return fx.rocdl.BufferCopy128b, 1
     if bits == 256:
         # Two 128-bit copies.
-        return fx.rocdl.BufferCopy128b(), 2
+        return fx.rocdl.BufferCopy128b, 2
     if bits == 512:
-        return fx.rocdl.BufferCopy128b(), 4
+        return fx.rocdl.BufferCopy128b, 4
     raise ValueError(
         f"vec_width * bits = {bits} has no matching BufferCopy atom; "
         f"reduce vec_width or change dtype"
     )
+
+
+def decompose_buffer_copy(elem_dt, vec_width: int):
+    """Decompose a vector of `vec_width` elements of `elem_dt` into a sequence
+    of (atom_factory, elem_count) copy chunks that together cover the vector.
+
+    Returns a list of (atom_factory, elem_count) pairs.  The factories are
+    unbound `fx.rocdl.BufferCopyNb` constructors; call them inside the
+    `@flyc.kernel` body.  Each chunk advances the offset by ``elem_count``
+    elements; the caller is responsible for issuing one ``copy_atom_call``
+    per chunk against the appropriate slice.
+
+    Strategy: greedy descending widths in {128b, 64b, 32b}.  For element
+    widths that don't divide 32b evenly the function falls through to 16b
+    chunks; on widths smaller than 16b an exception is raised.
+    """
+    elem_bits = elem_dt.width
+    total_bits = vec_width * elem_bits
+    chunks: list = []
+    remaining = total_bits
+    while remaining > 0:
+        for width_bits, factory in (
+            (128, fx.rocdl.BufferCopy128b),
+            (64, fx.rocdl.BufferCopy64b),
+            (32, fx.rocdl.BufferCopy32b),
+            (16, fx.rocdl.BufferCopy16b),
+        ):
+            if remaining >= width_bits and (width_bits % elem_bits) == 0:
+                count = width_bits // elem_bits
+                chunks.append((factory, count))
+                remaining -= width_bits
+                break
+        else:
+            raise ValueError(
+                f"cannot decompose {total_bits} bits with element width "
+                f"{elem_bits}; smallest atom is 16b"
+            )
+    return chunks
 
 
 def make_register_memref(elem_dt, length: int):

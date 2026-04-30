@@ -16,7 +16,7 @@ import threading
 import pytest
 import torch
 
-from fly_fly_tile_kernels.testing.bench import make_param_key
+from fly_tile_kernels.testing.bench import make_param_key
 
 # Baseline file, co-located with this plugin
 _BASELINES_PATH = os.path.join(os.path.dirname(__file__), 'benchmark_baselines.jsonl')

@@ -4,10 +4,10 @@ import pytest
 import torch
 
 import fly_tile_kernels
-from fly_fly_tile_kernels.testing.generator import generate_topk_idx, generate_hidden_sizes, generate_moe_params
-from fly_fly_tile_kernels.testing.numeric import assert_equal, count_bytes
-from fly_fly_tile_kernels.testing.bench import make_param_id
-from fly_fly_tile_kernels.torch.per_channel_cast_fused import per_channel_cast_fused as torch_ref_per_channel_cast_fused
+from fly_tile_kernels.testing.generator import generate_topk_idx, generate_hidden_sizes, generate_moe_params
+from fly_tile_kernels.testing.numeric import assert_equal, count_bytes
+from fly_tile_kernels.testing.bench import make_param_id
+from fly_tile_kernels.torch.per_channel_cast_fused import per_channel_cast_fused as torch_ref_per_channel_cast_fused
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'

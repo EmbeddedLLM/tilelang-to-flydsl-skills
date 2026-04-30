@@ -11,10 +11,48 @@ cannot be exercised at all.
 
 ## Legend
 
-- ✅ **ported** — full FlyDSL implementation written; needs GPU validation.
+- ✅ **ported & test-green** — full FlyDSL implementation; pytest passes
+  on this gfx950 box.
+- ✅⏳ **ported, untested** — full FlyDSL implementation written; not
+  yet exercised on this box.
 - 🟡 **skeleton** — pseudocode-level skeleton in module docstring; the
   function raises `NotImplementedError` until the skeleton is filled in.
 - ❌ **stub** — placeholder only; raises `NotImplementedError`.  No skeleton.
+
+## FlyDSL API quirks discovered while porting (this build)
+
+Patterns the skill examples needed updating for in this FlyDSL version
+(documented inline in `moe/normalize_weight_kernel.py`):
+
+- **Dynamic-if requires a Call in the test.**  The AST rewriter only
+  rewrites `if`-statements whose test contains an `ast.Call`.  Bare
+  comparisons (`if row < n:`) fall through to Python `__bool__` and
+  raise.  Workaround: pass through a no-op helper, e.g. `_dyn(x): return x`,
+  and write `if _dyn(row < n):`.
+- **Vector ops want raw `ir.Value`, not Numeric wrappers.**
+  `vector.broadcast(vty, x)` and `vector.reduction(..., acc=x)` reject
+  `fx.Float32(...)` etc.; pass `x.ir_value()` instead.
+- **`vector.from_elements` needs an MLIR VectorType.**  The skill's
+  `full(N, scalar, dtype)` is not in this build.  Use
+  `from_elements(ir.VectorType.get([N], dtype.ir_type), [scalars...])`.
+- **`memref_load_vec`/`memref_store_vec` work on 1-D vectors only.**
+  A `(1, 1)` register memref produces `vector<1xf32>`, not `vector<1x1xf32>`;
+  extract with `static_position=[0]`.
+- **`pick_buffer_copy_atom` factories must be invoked inside the kernel.**
+  `BufferCopyNb()` constructs an MLIR type; calling it outside an MLIR
+  context raises.  The helper now returns the unbound factory; the kernel
+  body invokes it.  Handles widths {16, 32, 64, 128, 256, 512} bits;
+  irregular widths fall back to per-element BufferCopy32b loops.
+- **`assert_equal` is bit-exact** (uint8 view).  Reductions must match
+  the torch reference's accumulation order — for normalize_weight this
+  meant a left-fold from the 1e-20 epsilon, not reduce-then-add.
+- **Runtime kernel cache reuses stale `CallState`.**
+  `tests/conftest.py` sets `FLYDSL_RUNTIME_ENABLE_CACHE=0` to work
+  around a `CallState` reuse bug — same kernel, different test data
+  observed stale outputs from a prior test.
+- **`torch.autograd.Function.forward` passes grad-enabled tensors.**
+  FlyDSL's JitArgument refuses these.  Detach inside the kernel runner
+  before launching.
 
 ## Cross-cutting blockers
 
@@ -35,8 +73,8 @@ batch of kernels:
 
 | Kernel | Status | Notes |
 |---|---|---|
-| `normalize_weight` | ✅ | Patterned exactly off skill's worked example; per-row L1 normalisation with 1e-20 bias. Verified vs `softmax_kernel.py` patterns. |
-| `mask_indices_by_tp` | ❌ | Needs integer BufferCopy skeleton. |
+| `normalize_weight` | ✅ | Per-element BufferCopy32b decomposition, supports any num_topk (incl. 6, 8, 9 widths from the test grid). Bit-exact against torch ref (left-fold from 1e-20). 12/12 tests green. |
+| `mask_indices_by_tp` | ✅ | Per-element int64 BufferCopy64b. Branching condition via chained `Boolean.select`. 36/36 tests green. |
 | `group_count` | ❌ | Needs integer LDS + global atomics. |
 | `aux_fi` | ❌ | Needs integer LDS atomic + float global atomic. |
 | `inplace_unique_group_indices` | ❌ | Needs integer BufferCopy skeleton. |
@@ -72,9 +110,14 @@ batch of kernels:
 
 ### mhc/
 
-All MHC kernels are stubbed.  They are accessed only through the modeling
-layer (`fly_tile_kernels.modeling.mhc.ops.*`), which itself imports them.
-Calling any modeling-layer MHC op will surface the stub error.
+| Kernel | Status | Notes |
+|---|---|---|
+| `expand` (fwd + bwd) | ✅ | bf16 broadcast (fwd) + fp32-accumulate (bwd). One thread per `(token, h_col)` element, mhc-fold serialised. 36/36 tests green. Detaches gradient-enabled tensors at runner boundary so `torch.autograd.Function.forward` works. |
+| (others) | ❌ | Stubbed; see module docstrings.
+
+The remaining MHC kernels are accessed only through the modeling layer
+(`fly_tile_kernels.modeling.mhc.ops.*`).  Calling any unported MHC op will
+surface the stub error.
 
 ### engram/
 
@@ -98,27 +141,56 @@ rewrites.  These are pure Python and have no FlyDSL dependency.
 
 ## Recommended order for completing the port
 
-1. **Resolve the integer-atomic blocker** — exposes `group_count`, `aux_fi`,
-   `get_fused_mapping`, `expand_to_fused` in one shot.
-2. **Build the integer BufferCopy skeleton** — exposes `mask_indices_by_tp`,
-   `inplace_unique_group_indices`, the int64 store for `topk_gate`.
-3. **Port `topk_gate`** as a self-contained reduction-style kernel.
-4. **Port the worked-example transpose** as a shared-memory exemplar.
-5. **Port `cast_back`** as a simple quant exemplar (load, scale, store).
-6. **Port `per_token_cast`** — the canonical per-row reduction-then-cast.
-7. **Decide on the wave-size strategy** for `top2_sum_gate` and port it.
-8. **Port the remaining quant + MHC + engram kernels** in any order;
-   they share the per-token / per-block reduction skeleton.
+Updated after the first validation batch landed `normalize_weight`,
+`mhc.expand`, and `mask_indices_by_tp`.  The integer-BufferCopy "blocker"
+turned out to be a non-issue once `pick_buffer_copy_atom` was made lazy
+(see API quirks above) — `BufferCopy64b()` works fine for `Int64`.
+
+1. **Pick the next batch from these "low-friction" kernels** — same
+   single-thread-per-element shape as the three already-green ports:
+   * `engram.engram_hash` — int32 input + int64 hash with bitwise_xor and
+     modulo; needs Int64 BufferCopy + a small register fragment for the
+     output column-vector.
+   * `quant.cast_back` — fp8 / fp4 → fp32 dequant; exercises the OCP
+     `Float8E4M3FN` / `Float8E5M2` dtype path on gfx950.
+   * `transpose.batched_transpose` — first kernel that actually needs LDS;
+     the worked-example skeleton in
+     `references/worked_examples/batched_transpose.md` is the starting
+     point.
+2. **Then the harder reductions** — `topk_gate`, then `per_token_cast`
+   (vec-reduce + sf-store).  These need the wave/block-reduction butterfly
+   in `_flydsl_helpers.py` (already written, but not exercised by any
+   green kernel yet — verify on first use).
+3. **Atomic-add kernels** (`group_count`, `aux_fi`, `get_fused_mapping`,
+   `expand_to_fused`) — STATUS.md previously called these blocked on
+   integer LDS atomics.  The bitcast-int↔float workaround approved by the
+   user is the path: store via `raw_ptr_buffer_atomic_fadd` against an
+   int32 reinterpreted as float32 for non-negative monotonic counters.
+   Validate the bitcast roundtrip on a small test before committing.
+4. **MFMA/fused/pipelined kernels** (`engram.gate_*`, `mhc.post`,
+   `mhc.multilayer_recompute`, `swiglu_*` quant variants) — these need
+   the GEMM skeleton from the skill plus pipelined data movement.
+   Largest individual lift; do last.
+5. **Wave32 ↔ wave64 mismatch decision** for `top2_sum_gate` and
+   `topk_sum_and_topk_group_idx` — TileKernels assumes wave32, gfx950 is
+   wave64.  Either run two tokens per wave or generalise the lane math.
 
 ## Testing strategy on gfx950
 
 ```sh
-# Build and install FlyDSL first (see FlyDSL/scripts/build*.sh).
-pip install -e ".[dev]"
-cd FlyTileKernels
+# One-time setup on a fresh checkout: setuptools-scm needs git metadata,
+# so set a pretend version and a ceiling so it does not walk up into the
+# parent skills git repo.
+GIT_CEILING_DIRECTORIES=$(realpath ..) \
+  SETUPTOOLS_SCM_PRETEND_VERSION_FOR_FLY_TILE_KERNELS=0.0.1 \
+  pip install -e ".[dev]"
 
-# Run only the ported kernel's tests:
-pytest tests/moe/test_normalize_weight.py -n 4
+cd /app/flytilelang/tilelang-to-flydsl-skills/FlyTileKernels
+
+# Run the currently-green kernel tests (expect 84 passed, 84 skipped):
+pytest tests/moe/test_normalize_weight.py \
+       tests/moe/test_mask_indices_by_tp.py \
+       tests/mhc/test_expand.py -v
 
 # Try the full suite to see the stub failure pattern:
 pytest tests/ -n 4

@@ -5,13 +5,13 @@ import torch.nn.functional as F
 import pytest
 
 import fly_tile_kernels
-from fly_fly_tile_kernels.moe.scoring import ScoringFunc
-from fly_fly_tile_kernels.testing.generator import generate_num_tokens
-from fly_fly_tile_kernels.testing.numeric import count_bytes, assert_equal
-from fly_fly_tile_kernels.testing.bench import make_param_id
+from fly_tile_kernels.moe.scoring import ScoringFunc
+from fly_tile_kernels.testing.generator import generate_num_tokens
+from fly_tile_kernels.testing.numeric import count_bytes, assert_equal
+from fly_tile_kernels.testing.bench import make_param_id
 
-from fly_fly_tile_kernels.torch import topk_sum_and_topk_group_idx as torch_topk_sum_and_topk_group_idx
-from fly_fly_tile_kernels.torch import top2_sum_gate as torch_top2_sum_gate
+from fly_tile_kernels.torch import topk_sum_and_topk_group_idx as torch_topk_sum_and_topk_group_idx
+from fly_tile_kernels.torch import top2_sum_gate as torch_top2_sum_gate
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'

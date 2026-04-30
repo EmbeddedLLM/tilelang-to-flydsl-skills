@@ -1,8 +1,17 @@
 """normalize_weight: row-local L1 normalisation of top-k routing weights.
 
-One thread per token row.  Each thread loads its full K-vector in a single
-BufferCopy, sums over K, and writes the normalised vector back.  Matches the
-TileKernels semantics including the `1e-20` epsilon bias on the denominator.
+One thread per token row.  Each thread loads its full K-vector via per-element
+BufferCopy32b atoms (works for any num_topk), folds them into a sum starting
+at 1e-20 to match the torch reference's left-fold order bit-exactly, and
+writes back the per-element normalised values.
+
+API notes (this FlyDSL build, gfx950):
+- AST rewriter only treats an `if` as dynamic if the test contains a Call.
+  Wrap simple comparisons in `_dyn(...)` so they are treated dynamically.
+- Vector ops want raw `ir.Value` operands; Numeric wrappers need
+  `.ir_value()` when handed to `vector.broadcast` / `reduction(acc=...)`.
+- A 1-element register memref `(1, 1)` loads as a 1-D `vector<1xf32>`;
+  `vector.extract(..., static_position=[0])` retrieves the scalar.
 """
 
 import os
@@ -10,20 +19,19 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import range_constexpr
-from flydsl.expr.vector import ReductionOp, full
+from flydsl.expr import vector as fxvec, range_constexpr
+from flydsl._mlir import ir
 
-from fly_tile_kernels._flydsl_helpers import pick_buffer_copy_atom, make_register_memref
+
+def _dyn(x):
+    """Identity passthrough used to make the AST rewriter treat a comparison
+    as a dynamic condition (it only triggers on `if`-tests that contain a
+    Call node in their AST)."""
+    return x
 
 
 def get_normalize_weight_kernel(num_topk: int):
     NUM_THREADS = 128
-    copy_op, n_atoms = pick_buffer_copy_atom(fx.Float32, num_topk)
-    if n_atoms != 1:
-        raise NotImplementedError(
-            f"normalize_weight: num_topk={num_topk} requires {n_atoms} BufferCopy atoms; "
-            f"only 1-atom widths supported in this port. Implement multi-atom unrolling if needed."
-        )
 
     @flyc.kernel
     def normalize_weight_kernel(
@@ -40,39 +48,53 @@ def get_normalize_weight_kernel(num_topk: int):
         d_buf = fx.rocdl.make_buffer_tensor(denominator)
         n_buf = fx.rocdl.make_buffer_tensor(normalized_weights)
 
-        reg_ty, reg_lay = make_register_memref(fx.Float32, num_topk)
-        scalar_ty, scalar_lay = make_register_memref(fx.Float32, 1)
+        scalar_ty = fx.MemRefType.get(
+            fx.Float32.ir_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register,
+        )
+        s_lay = fx.make_layout(1, 1)
+        copy_atom_32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
 
-        copy_atom_vec = fx.make_copy_atom(copy_op, fx.Float32)
-        copy_atom_scalar = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
-
-        # 1-D denominator: divide into per-element tiles so we can use
-        # `fx.slice(d_div, (None, row))` to get a single-element memref view.
         d_div = fx.logical_divide(d_buf, fx.make_layout(1, 1))
+        vec_ty_1 = ir.VectorType.get([1], fx.Float32.ir_type)
 
-        if row < num_tokens:
-            # Load: slice 2-D `x_buf` to row, divide by num_topk to get a 1-tile view.
-            r_in = fx.memref_alloca(reg_ty, reg_lay)
+        if _dyn(row < num_tokens):
             row_view = fx.slice(x_buf, (row, None))
-            row_div = fx.logical_divide(row_view, fx.make_layout(num_topk, 1))
-            fx.copy_atom_call(copy_atom_vec, fx.slice(row_div, (None, 0)), r_in)
-
-            v_in = fx.memref_load_vec(r_in)
-            sum_v = v_in.reduce(ReductionOp.ADD)
-            sum_with_eps = sum_v + fx.Float32(1e-20)
-
-            # Store denominator[row] = sum_with_eps via a single-element register memref.
-            d_reg = fx.memref_alloca(scalar_ty, scalar_lay)
-            fx.memref_store_vec(full(1, sum_with_eps, fx.Float32), d_reg)
-            fx.copy_atom_call(copy_atom_scalar, d_reg, fx.slice(d_div, (None, row)))
-
-            # Store normalised weights[row, :] = v_in / sum_with_eps.
-            v_out = v_in / sum_with_eps
-            r_out = fx.memref_alloca(reg_ty, reg_lay)
-            fx.memref_store_vec(v_out, r_out)
+            row_div_1 = fx.logical_divide(row_view, fx.make_layout(1, 1))
             n_view = fx.slice(n_buf, (row, None))
-            n_div = fx.logical_divide(n_view, fx.make_layout(num_topk, 1))
-            fx.copy_atom_call(copy_atom_vec, r_out, fx.slice(n_div, (None, 0)))
+            n_div_1 = fx.logical_divide(n_view, fx.make_layout(1, 1))
+
+            # Load each topk weight one element at a time, folding into `acc`
+            # in the same order the torch reference uses (1e-20 + w[0] + ...).
+            elem_regs = []
+            acc = fx.Float32(1e-20)
+            for k in range_constexpr(num_topk):
+                elem_reg = fx.memref_alloca(scalar_ty, s_lay)
+                src = fx.slice(row_div_1, (None, k))
+                fx.copy_atom_call(copy_atom_32, src, elem_reg)
+                elem_val = fxvec.extract(
+                    fx.memref_load_vec(elem_reg), static_position=[0],
+                )
+                acc = acc + fx.Float32(elem_val)
+                elem_regs.append(elem_reg)
+            sum_with_eps = acc
+
+            # Write denominator[row].
+            d_reg = fx.memref_alloca(scalar_ty, s_lay)
+            d_vec = fxvec.from_elements(vec_ty_1, [sum_with_eps])
+            fx.memref_store_vec(d_vec, d_reg)
+            fx.copy_atom_call(copy_atom_32, d_reg, fx.slice(d_div, (None, row)))
+
+            # Write normalized_weights[row, k] = w[k] / sum_with_eps for each k.
+            for k in range_constexpr(num_topk):
+                e_val = fxvec.extract(
+                    fx.memref_load_vec(elem_regs[k]), static_position=[0],
+                )
+                e_norm = fx.Float32(e_val) / sum_with_eps
+                e_reg = fx.memref_alloca(scalar_ty, s_lay)
+                e_vec = fxvec.from_elements(vec_ty_1, [e_norm])
+                fx.memref_store_vec(e_vec, e_reg)
+                dst = fx.slice(n_div_1, (None, k))
+                fx.copy_atom_call(copy_atom_32, e_reg, dst)
 
     @flyc.jit
     def launch(

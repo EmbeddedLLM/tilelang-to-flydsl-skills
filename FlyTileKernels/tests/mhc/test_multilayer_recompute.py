@@ -1,8 +1,8 @@
 import pytest
 import torch
-from fly_fly_tile_kernels.modeling.mhc.ops.multilayer_recompute import mhc_multilayer_recompute
-from fly_fly_tile_kernels.modeling.mhc.ops.post import mhc_post
-from fly_fly_tile_kernels.modeling.mhc.ops.pre_apply_mix import mhc_pre_apply_mix
+from fly_tile_kernels.modeling.mhc.ops.multilayer_recompute import mhc_multilayer_recompute
+from fly_tile_kernels.modeling.mhc.ops.post import mhc_post
+from fly_tile_kernels.modeling.mhc.ops.pre_apply_mix import mhc_pre_apply_mix
 
 
 _CORRECTNESS_CASES = [

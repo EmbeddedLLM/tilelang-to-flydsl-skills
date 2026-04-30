@@ -2,8 +2,8 @@ from typing import Callable
 
 import pytest
 import torch
-from fly_fly_tile_kernels.modeling.mhc.ops import mhc_pre_split_mixes
-from fly_fly_tile_kernels.torch.mhc import mhc_pre_split_mixes_ref
+from fly_tile_kernels.modeling.mhc.ops import mhc_pre_split_mixes
+from fly_tile_kernels.torch.mhc import mhc_pre_split_mixes_ref
 
 
 def generate_pre_split_mixes_test_data(
