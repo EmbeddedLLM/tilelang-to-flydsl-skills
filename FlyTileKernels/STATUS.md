@@ -99,14 +99,15 @@ batch of kernels:
 | `swiglu_forward_and_per_token_cast` | ❌ | Swiglu fwd fused with per-token quant. |
 | `swiglu_backward_and_per_token_cast` | ❌ | Swiglu bwd fused with per-token quant. |
 | `swiglu_forward_and_per_channel_cast_and_transpose` | ❌ | Swiglu fwd fused with per-channel quant + transpose. |
-| `cast_back` / `per_token_cast_back` | ❌ | fp8/fp4 dequantise back to bf16/fp32. |
+| `cast_back` / `per_token_cast_back` | ❌ | fp8/fp4 dequantise back to bf16/fp32.  Attempted in batch 2: blocked on the fp8 → fp32 cast lowering — `arith.extf f8E4M3FN → f32` produces an `unrealized_conversion_cast` that the LLVM pass cannot resolve, regardless of whether you wrap via `Float32(fp8_val)` or call `arith.extf` directly.  The path forward is the gfx950 `rocdl.cvt.scalef32.pk.f32.fp8` family (combines fp8→fp32 with a scale factor — basically the kernel's whole inner loop). |
 | `per_token_cast_to_e5m6` / `cast_back_e5m6` | ❌ | Non-standard 1+5+6 fp format; bit-twiddling encode/decode. |
 
 ### transpose/
 
 | Kernel | Status | Notes |
 |---|---|---|
-| `transpose` / `batched_transpose` | 🟡 | Skill repo has a ~150-line skeleton in `references/worked_examples/batched_transpose.md`. Needs verification of `SmemPtr.as_memref` + the decoded `loop_layout` thr/val pair. |
+| `transpose` / `batched_transpose` (bf16, fp32) | ✅ | Naive 1-thread-per-element implementation. 70/70 bf16 + fp32 tests green (`twice_stride` bf16, batched bf16, batched fp32). |
+| `transpose` / `batched_transpose` (fp8 e4m3) | ❌ | NotImplementedError. fp8 transpose requires LDS pair-and-pack to avoid sub-16b stores (`BufferCopy` minimum is 16b). 42 tests fail with the stub error. See `references/worked_examples/batched_transpose.md` for the LDS skeleton. |
 
 ### mhc/
 
@@ -126,7 +127,7 @@ surface the stub error.
 | `fused_weight` | ❌ | Engram fused-weight kernel. |
 | `engram_gate_fwd` / `engram_gate_bwd` | ❌ | Engram gate fwd/bwd (fused with rmsnorm). |
 | `grad_w_reduce` | ❌ | Engram weight gradient reduction. |
-| `engram_hash` | ❌ | Engram hashing kernel. |
+| `engram_hash` | ✅ | One thread per `(layer, token)` pair. Per-thread int32/int64 register fragments for token_ids/multipliers/vocab_sizes/offsets, unrolled bitwise_xor + modulo loop, int32 output. 2/2 tests green. |
 
 ### modeling/
 
@@ -141,22 +142,29 @@ rewrites.  These are pure Python and have no FlyDSL dependency.
 
 ## Recommended order for completing the port
 
-Updated after the first validation batch landed `normalize_weight`,
-`mhc.expand`, and `mask_indices_by_tp`.  The integer-BufferCopy "blocker"
-turned out to be a non-issue once `pick_buffer_copy_atom` was made lazy
-(see API quirks above) — `BufferCopy64b()` works fine for `Int64`.
+Updated after batch 2.  Currently green: `normalize_weight`, `mhc.expand`,
+`mask_indices_by_tp`, `engram_hash`, `transpose`/`batched_transpose`
+(bf16+fp32 only).  Total: 5 kernels, 156 passing tests.  The
+integer-BufferCopy "blocker" turned out to be a non-issue once
+`pick_buffer_copy_atom` was made lazy (see API quirks above) —
+`BufferCopy64b()` works fine for `Int64`.
 
-1. **Pick the next batch from these "low-friction" kernels** — same
-   single-thread-per-element shape as the three already-green ports:
-   * `engram.engram_hash` — int32 input + int64 hash with bitwise_xor and
-     modulo; needs Int64 BufferCopy + a small register fragment for the
-     output column-vector.
-   * `quant.cast_back` — fp8 / fp4 → fp32 dequant; exercises the OCP
-     `Float8E4M3FN` / `Float8E5M2` dtype path on gfx950.
-   * `transpose.batched_transpose` — first kernel that actually needs LDS;
-     the worked-example skeleton in
-     `references/worked_examples/batched_transpose.md` is the starting
-     point.
+1. **Tackle the fp8 conversion path** — unblocks `quant.cast_back`,
+   `quant.per_token_cast_back`, the fp8 transpose tests, and most of the
+   `quant/` directory.  The blocker is that `arith.extf f8E4M3FN → f32`
+   produces an `unrealized_conversion_cast` that the FlyDSL→LLVM pipeline
+   cannot lower for OCP fp8 on gfx950.  Three plausible paths:
+   * Use `rocdl.cvt.f32.fp8` / `rocdl.cvt.pk.f32.fp8` directly — these
+     are the FNUZ-flavoured CDNA3 intrinsics, may work on gfx950 with
+     mode flags.
+   * Use the gfx950-native `rocdl.cvt.scalef32.pk.f32.fp8` family which
+     combines fp8→fp32 with a scale factor (perfect fit for `cast_back`).
+   * Manual bit twiddling: extract sign/exp/mantissa as integers,
+     reassemble as f32 — slow but always works and avoids LDS too.
+2. **fp8 transpose via LDS pair-and-pack** — once fp8 conversion isn't
+   needed (transpose moves bytes, not arithmetic), this is independent
+   from #1: stage two adjacent threads' fp8 values in LDS, pair into a
+   16-bit chunk, then store with a single `BufferCopy16b`.
 2. **Then the harder reductions** — `topk_gate`, then `per_token_cast`
    (vec-reduce + sf-store).  These need the wave/block-reduction butterfly
    in `_flydsl_helpers.py` (already written, but not exercised by any
@@ -187,10 +195,13 @@ GIT_CEILING_DIRECTORIES=$(realpath ..) \
 
 cd /app/flytilelang/tilelang-to-flydsl-skills/FlyTileKernels
 
-# Run the currently-green kernel tests (expect 84 passed, 84 skipped):
+# Run the currently-green kernel tests (expect 156 passed, 162 skipped,
+# 42 fp8 fails — those are explicit NotImplementedError stubs):
 pytest tests/moe/test_normalize_weight.py \
        tests/moe/test_mask_indices_by_tp.py \
-       tests/mhc/test_expand.py -v
+       tests/mhc/test_expand.py \
+       tests/engram/test_engram_hash.py \
+       tests/transpose/test_transpose.py
 
 # Try the full suite to see the stub failure pattern:
 pytest tests/ -n 4
