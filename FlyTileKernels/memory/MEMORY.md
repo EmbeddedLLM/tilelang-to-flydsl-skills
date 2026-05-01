@@ -1,0 +1,5 @@
+- [FlyDSL API quirks vs the skill examples](flydsl_api_quirks.md) — the skill's reference patterns are out of date in this build; concrete substitutes documented.
+- [TileKernels port: validation context](tilekernels_port_context.md) — gfx950 box, FlyDSL 0.1.2 only, no working FlyDSL example kernels installed; ports must be reverse-engineered.
+- [pytest setup gotchas for FlyTileKernels](pytest_flytilekernels_setup.md) — pip install + version pretend + cache disable + tests/ typo fix.
+- [MHC port progress](mhc_port_progress.md) — current state of the MHC kernel port: real FlyDSL forwards for 5 kernels, torch-fallback bwds, GEMM-via-torch for norm_fn.
+- [MHC kernel patterns](mhc_kernel_patterns.md) — recurring patterns used in the MHC ports: per-token elementwise, register-resident sinkhorn, mhc-fold contraction.

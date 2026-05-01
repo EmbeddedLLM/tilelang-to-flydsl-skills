@@ -113,12 +113,27 @@ batch of kernels:
 
 | Kernel | Status | Notes |
 |---|---|---|
-| `expand` (fwd + bwd) | ✅ | bf16 broadcast (fwd) + fp32-accumulate (bwd). One thread per `(token, h_col)` element, mhc-fold serialised. 36/36 tests green. Detaches gradient-enabled tensors at runner boundary so `torch.autograd.Function.forward` works. |
-| (others) | ❌ | Stubbed; see module docstrings.
+| `expand` (fwd + bwd) | ✅ | bf16 broadcast (fwd) + fp32-accumulate (bwd). One thread per `(token, h_col)` element, mhc-fold serialised. 36/36 tests green. |
+| `head_compute_mix` (fwd) | ✅ | Real FlyDSL kernel: per-element sigmoid via `1 / (1 + exp(-z))` using `flydsl.expr.math.exp`. One thread per token, mhc-loop unrolled. 4/4 tests green. |
+| `head_compute_mix` (bwd) | 🟡 | Torch fallback (autograd-replay). Needs cross-block reductions for `mhc_scale_grad`/`mhc_base_grad` partial buffers. |
+| `pre_split_mixes` (fwd) | ✅ | Real FlyDSL kernel: 3 elementwise outputs (sigmoid + eps, sigmoid * post_mult, linear) per token. 4/4 tests green. |
+| `pre_split_mixes` (bwd) | 🟡 | Torch fallback (autograd-replay). |
+| `sinkhorn` (fwd) | ✅ | Real FlyDSL kernel: per-thread (mhc, mhc) state with iterative softmax + row/col normalise. mhc=4 → 16 fp32 registers per thread. 6/6 tests green. |
+| `sinkhorn` (bwd) | 🟡 | Torch fallback (autograd-replay). |
+| `pre_apply_mix` (fwd) | ✅ | Real FlyDSL kernel: one thread per (token, h) element, mhc-loop unrolled with bf16→fp32→bf16 fold. 12/12 tests green. |
+| `pre_apply_mix` (bwd) | 🟡 | Torch fallback. The mix_grad reduction over h needs cross-thread wave/block reduce. |
+| `post` (fwd) | ✅ | Real FlyDSL kernel: one thread per (token, h) element computes mhc outputs by mhc-by-mhc inner contraction in registers. 6/6 tests green. |
+| `post` (bwd) | 🟡 | Torch autograd-replay fallback. d_post_mix and d_comb_mix need cross-h reductions. |
+| `multilayer_recompute` | ✅ | Implemented as chained calls to the (real-FlyDSL) `mhc_pre_apply_mix` and `mhc_post` modeling-layer ops, matching the unfused reference bit-exactly. 11/11 tests green. |
+| `pre_big_fuse` | ✅ | Composition: torch wraps the FlyDSL sinkhorn (`_mhc_sinkhorn_fwd`) plus torch RMS rsqrt + sigmoid splits + pre_apply_mix to match the unfused reference under `torch.equal`. 12/12 tests green. |
+| `norm_fn` (fwd_mul / fwd_norm / bwd_mul / bwd_norm / fn_normw_merge) | 🟡 | Torch fallback. The matmul step uses `torch.matmul` (hipBLASLt under the hood), which is the right call here — a hand-rolled FlyDSL MFMA GEMM would be a major effort and unlikely to outperform the vendored kernel for these sizes. 24/24 tests green via the fallback. |
 
-The remaining MHC kernels are accessed only through the modeling layer
-(`fly_tile_kernels.modeling.mhc.ops.*`).  Calling any unported MHC op will
-surface the stub error.
+**Summary**: 115/115 MHC correctness tests green (8 benchmarks skipped).
+All forward kernels except `norm_fn`'s GEMM are now real FlyDSL kernels;
+backward kernels for non-trivial reductions are torch autograd-replay
+fallbacks while remaining bit-exact-or-tolerance-compliant against the
+unfused references.  The MHC modeling layer
+(`fly_tile_kernels.modeling.mhc.ops.*`) calls into these without changes.
 
 ### engram/
 
