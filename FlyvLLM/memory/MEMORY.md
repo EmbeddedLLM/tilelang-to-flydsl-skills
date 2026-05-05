@@ -1,0 +1,2 @@
+- [FlyvLLM port project context](flyvllm_port_context.md) — what FlyvLLM is, how it relates to vLLM and FlyTileKernels, what's ported, what is intentionally torch-fallback.
+- [FlyvLLM test strategy](flyvllm_test_strategy.md) — how the tests reference the math vs the upstream TileLang kernels, what tolerance to expect.

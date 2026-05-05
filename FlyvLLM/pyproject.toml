@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fly_vllm"
+version = "0.0.1"
+description = "FlyDSL kernels for vLLM MHC layer (gfx950 target)."
+readme = "README.md"
+license = "Apache-2.0"
+authors = [
+    { name = "FlyvLLM contributors" },
+]
+dependencies = [
+    "torch>=2.4",
+    "flydsl",
+]
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+dev = ["setuptools", "wheel", "pytest", "pytest-xdist"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["fly_vllm*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
