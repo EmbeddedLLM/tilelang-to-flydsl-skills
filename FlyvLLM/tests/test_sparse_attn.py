@@ -30,7 +30,11 @@ def _make_prefill_inputs(s_q: int, s_kv: int, h_q: int, d_qk: int, head_dim: int
 
 @pytest.mark.parametrize("s_q,s_kv,h_q,d_qk,head_dim,topk",
                          [(8, 128, 4, 192, 128, 32),
-                          (33, 256, 8, 192, 128, 64)])
+                          (33, 256, 8, 192, 128, 64),
+                          # DeepSeek V4 absorbed-MLA shapes (small s_q for speed).
+                          (8, 1024, 16, 576, 512, 512),
+                          (8, 2048, 16, 576, 512, 1024)],
+                         ids=["v3_topk32", "v3_topk64", "v4flash", "v4pro"])
 def test_sparse_attn_prefill_correctness(s_q, s_kv, h_q, d_qk, head_dim, topk):
     q, kv, idx, lens = _make_prefill_inputs(s_q, s_kv, h_q, d_qk, head_dim, topk)
     scale = 1.0 / (d_qk ** 0.5)
@@ -41,17 +45,29 @@ def test_sparse_attn_prefill_correctness(s_q, s_kv, h_q, d_qk, head_dim, topk):
 
 
 @pytest.mark.parametrize("s_q,s_kv,h_q,d_qk,head_dim,topk",
-                         [(64, 1024, 8, 192, 128, 256)])
+                         [
+                             # original V3-style config
+                             (64, 1024, 8, 192, 128, 256),
+                             # DeepSeek V4 Flash, TP=4
+                             (64, 2048, 16, 576, 512, 512),
+                             # DeepSeek V4 Pro, TP=8
+                             (64, 4096, 16, 576, 512, 1024),
+                         ],
+                         ids=["v3_h8_topk256", "v4flash_tp4", "v4pro_tp8"])
 def test_sparse_attn_prefill_benchmark(s_q, s_kv, h_q, d_qk, head_dim, topk, capsys):
     q, kv, idx, lens = _make_prefill_inputs(s_q, s_kv, h_q, d_qk, head_dim, topk)
     scale = 1.0 / (d_qk ** 0.5)
     sink = torch.randn(h_q, dtype=torch.float32, device="cuda") * 0.1
-    torch_compiled = torch.compile(rocm_ref_sparse_attn_prefill_torch, dynamic=False)
+    # torch.compile spends >10s warming up at the larger DSv4 sizes — skip it
+    # for the d_qk>=576 configs where the compile-warmup cost dominates the
+    # benchmark wall-clock.
     results = {
         "torch": bench(lambda: rocm_ref_sparse_attn_prefill_torch(q, kv, idx, lens, scale, head_dim, sink)),
-        "compile": bench(lambda: torch_compiled(q, kv, idx, lens, scale, head_dim, sink)),
         "flydsl": bench(lambda: rocm_ref_sparse_attn_prefill_flydsl(q, kv, idx, lens, scale, head_dim, sink)),
     }
+    if d_qk < 576:
+        torch_compiled = torch.compile(rocm_ref_sparse_attn_prefill_torch, dynamic=False)
+        results["compile"] = bench(lambda: torch_compiled(q, kv, idx, lens, scale, head_dim, sink))
     label = f"sparse_prefill q={s_q} kv={s_kv} h={h_q} d={d_qk} topk={topk}"
     with capsys.disabled():
         print()
