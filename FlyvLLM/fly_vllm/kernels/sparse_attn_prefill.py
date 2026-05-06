@@ -43,7 +43,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import vector as fxvec, range_constexpr, gpu, math as fxmath, arith
+from flydsl.expr import vector as fxvec, range_constexpr, gpu, arith, rocdl
 from flydsl._mlir import ir
 from flydsl._mlir.ir import InsertionPoint
 from flydsl._mlir.dialects import arith as _arith
@@ -52,6 +52,23 @@ from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.utils.smem_allocator import (
     SmemAllocator, SmemPtr, get_mlir_type_size,
 )
+
+
+# Fold into scale so the softmax inner can use bare v_exp_f32 (rocdl.exp2)
+# without paying for a per-call log2e multiply on (m_old - m_new) and
+# (score - m_new). All of m / score / alpha / e are kept in the log2
+# domain throughout the kernel; outputs are unaffected.
+LOG2E = 1.4426950408889634
+
+
+def _fast_exp2(x: fx.Float32) -> fx.Float32:
+    """Bare v_exp_f32 (no range reduction).
+
+    Safe wherever the argument is <= 0 (so the implicit -inf path returns 0
+    and there's no overflow concern). For the lonely-tile case (m_new == -inf
+    so arg == NaN) callers already select 0 via tile_lonely / m_was_minf.
+    """
+    return fx.Float32(rocdl.exp2(fx.Float32.ir_type, x.ir_value()))
 
 
 def _idx(v):
@@ -177,6 +194,9 @@ def _build_kernel(
     DK = d_qk
     HD = head_dim
     TOPK = topk
+    # Bake LOG2E into the scale so the score multiply produces values
+    # already in the log2 domain (allowing rocdl.exp2 to replace exp).
+    SCALE_LOG2E = scale * LOG2E
     BLOCK_N = _block_n_for(DK)
     NUM_TILES = TOPK // BLOCK_N
     # For DK > 256 (DSv4 sizes), the d-dim score loop must be a runtime
@@ -327,6 +347,9 @@ def _build_kernel(
             sink_val = fx.Float32(
                 fxvec.extract(fx.memref_load_vec(rs), static_position=[0])
             )
+            # Pre-scale to log2 domain so the finalize sink_term can use
+            # rocdl.exp2(sink_val - m) (m is already log2-domain).
+            sink_val = sink_val * fx.Float32(LOG2E)
 
         # ---- Streaming softmax state (per-thread, register) ---------------
         # Each thread owns OUT_PER_THREAD output elements at strided indices
@@ -438,7 +461,7 @@ def _build_kernel(
                     final_d_acc = (yield new_acc.ir_value())
                 acc = fx.Float32(final_d_acc)
                 acc = _group_reduce_sum(acc, THREADS_PER_SCORE)
-                acc = acc * fx.Float32(scale)
+                acc = acc * fx.Float32(SCALE_LOG2E)
                 score = fx.Float32(valid.select(
                     acc.ir_value(),
                     fx.Float32(float("-inf")).ir_value(),
@@ -449,13 +472,14 @@ def _build_kernel(
                 tile_m = _block_reduce(score, "max", red_smem, tid)
                 m_new = m.maximumf(tile_m)
 
-                # 2e. exp(score - m_new), with -inf safety.
-                alpha = fx.Float32(fxmath.exp(m - m_new))
+                # 2e. exp(score - m_new), with -inf safety.  All values are
+                # already in the log2 domain (scale folds in LOG2E).
+                alpha = _fast_exp2(m - m_new)
                 m_was_minf = m == fx.Float32(float("-inf"))
                 alpha = fx.Float32(m_was_minf.select(
                     fx.Float32(1.0).ir_value(), alpha.ir_value(),
                 ))
-                e = fx.Float32(fxmath.exp(score - m_new))
+                e = _fast_exp2(score - m_new)
                 tile_lonely = m_new == fx.Float32(float("-inf"))
                 e = fx.Float32(tile_lonely.select(
                     fx.Float32(0.0).ir_value(), e.ir_value(),
@@ -581,7 +605,7 @@ def _build_kernel(
                         SmemPtr.load(k_smem, [_idx(tid_safe), _idx(d)])
                     ).to(fx.Float32)
                     acc = acc + qv * kvv
-                acc = acc * fx.Float32(scale)
+                acc = acc * fx.Float32(SCALE_LOG2E)
                 score = fx.Float32(valid.select(
                     acc.ir_value(),
                     fx.Float32(float("-inf")).ir_value(),
@@ -591,13 +615,14 @@ def _build_kernel(
                 tile_m = _block_reduce(score, "max", red_smem, tid)
                 m_new = m.maximumf(tile_m)
 
-                # 2e. exp(score - m_new), with -inf safety.
-                alpha = fx.Float32(fxmath.exp(m - m_new))
+                # 2e. exp(score - m_new), with -inf safety.  log2-domain
+                # softmax; rocdl.exp2 emits a single v_exp_f32.
+                alpha = _fast_exp2(m - m_new)
                 m_was_minf = m == fx.Float32(float("-inf"))
                 alpha = fx.Float32(m_was_minf.select(
                     fx.Float32(1.0).ir_value(), alpha.ir_value(),
                 ))
-                e = fx.Float32(fxmath.exp(score - m_new))
+                e = _fast_exp2(score - m_new)
                 tile_lonely = m_new == fx.Float32(float("-inf"))
                 e = fx.Float32(tile_lonely.select(
                     fx.Float32(0.0).ir_value(), e.ir_value(),
@@ -632,11 +657,13 @@ def _build_kernel(
 
         # ---- Finalize ------------------------------------------------------
         if use_attn_sink:
-            # l += exp(sink - m)   (handle m == -inf below).
-            sink_term = fx.Float32(fxmath.exp(sink_val - m))
+            # l += exp(sink - m_orig).  sink_val and m are both pre-scaled
+            # by LOG2E, so exp(sink - m_orig) == exp2(sink_val - m).
+            sink_term = _fast_exp2(sink_val - m)
             m_was_minf = m == fx.Float32(float("-inf"))
-            # if m == -inf, we'd have sink_term = exp(+inf) = inf;  but since
-            # we'll output 0 in that case anyway, just avoid NaN by using 0.
+            # if m == -inf, we'd have sink_term = exp2(+inf) = inf; but
+            # since we'll output 0 in that case anyway, just avoid NaN by
+            # using 0.
             sink_term = fx.Float32(m_was_minf.select(
                 fx.Float32(0.0).ir_value(), sink_term.ir_value(),
             ))
@@ -710,10 +737,19 @@ def rocm_ref_sparse_attn_prefill_torch(
     scale: float,
     head_dim: int,
     attn_sink: torch.Tensor | None,
-) -> torch.Tensor:
+    output: torch.Tensor | None = None,
+) -> torch.Tensor | None:
+    """If ``output`` is given (the vLLM call style — see
+    ``vllm.model_executor.layers.deepseek_v4_attention`` line 1026), the
+    fp32 result is cast and copied into it in place and the function
+    returns ``None``.  Otherwise a fresh bf16 tensor is allocated and
+    returned (used by the test harness)."""
     indices = indices.clone().squeeze(1)
     s_q, h_q, d_qk = q.shape
     topk = indices.shape[-1]
+    # Match the vLLM call shape: kv may be (s_kv, 1, d_qk).
+    if kv.dim() == 3:
+        kv = kv.reshape(kv.shape[0], kv.shape[2])
     s_kv = kv.shape[0]
     if topk_length is not None:
         mask = torch.arange(topk, device=indices.device).unsqueeze(0) >= topk_length.unsqueeze(1)
@@ -739,7 +775,10 @@ def rocm_ref_sparse_attn_prefill_torch(
     out = probs @ gathered[..., :head_dim]
     lonely = orig_lse == float("-inf")
     out[lonely.unsqueeze(-1).expand_as(out)] = 0.0
-    return out.to(torch.bfloat16)
+    if output is None:
+        return out.to(torch.bfloat16)
+    output.copy_(out)  # casts fp32 -> output.dtype in-place
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -778,12 +817,31 @@ def rocm_ref_sparse_attn_prefill_flydsl(
     scale: float,
     head_dim: int,
     attn_sink: torch.Tensor | None,
-) -> torch.Tensor:
+    output: torch.Tensor | None = None,
+) -> torch.Tensor | None:
+    """vLLM-compatible entry point.
+
+    When called from
+    ``vllm.model_executor.layers.deepseek_v4_attention`` (line 1026),
+    ``output`` is a pre-allocated bf16 ``(s_q, h_q, head_dim)`` slice; the
+    kernel writes into it directly and returns ``None`` — no extra
+    allocation or final copy.  When ``output`` is ``None`` (test harness
+    path), a fresh bf16 tensor is allocated and returned.
+    """
     s_q, h_q, d_qk = q.shape
     topk = indices.shape[-1]
+    # vLLM passes kv as ``kv.view(-1, 1, d_qk)`` (3-D, one "kv head").  The
+    # FlyDSL kernel is written for a 2-D ``(s_kv, d_qk)`` KV tensor, so
+    # collapse the spurious head axis here.  No-op for 2-D kv (test path).
+    if kv.dim() == 3:
+        assert kv.shape[1] == 1, (
+            f"sparse_attn_prefill expects exactly one kv head, got {kv.shape}"
+        )
+        kv = kv.reshape(kv.shape[0], kv.shape[2])
     if not _can_use_flydsl(q, kv, indices, topk, head_dim):
         return rocm_ref_sparse_attn_prefill_torch(
             q, kv, indices, topk_length, scale, head_dim, attn_sink,
+            output=output,
         )
     s_kv = kv.shape[0]
     indices2 = indices.squeeze(1).contiguous().to(torch.int32)
@@ -799,9 +857,29 @@ def rocm_ref_sparse_attn_prefill_flydsl(
     else:
         sink = attn_sink[:h_q].to(torch.float32).contiguous()
         use_sink = True
-    out = torch.empty(s_q, h_q, head_dim, dtype=torch.bfloat16, device=q.device)
     runner = _get_kernel(
         h_q, d_qk, head_dim, topk, use_sink, use_len, float(scale),
     )
+    # Direct-write fast path: caller already owns the bf16 (s_q, h_q,
+    # head_dim) buffer in the right shape.  The kernel writes into it via
+    # buffer_store, so the caller's tensor must be contiguous.
+    direct_write = (
+        output is not None
+        and output.dtype == torch.bfloat16
+        and output.shape == (s_q, h_q, head_dim)
+        and output.is_contiguous()
+        and output.device == q.device
+    )
+    if direct_write:
+        runner(q.contiguous(), kv.contiguous(), indices2, tk_len, sink,
+               output, s_kv, s_q)
+        return None
+    out = torch.empty(s_q, h_q, head_dim, dtype=torch.bfloat16, device=q.device)
     runner(q.contiguous(), kv.contiguous(), indices2, tk_len, sink, out, s_kv, s_q)
-    return out
+    if output is None:
+        return out
+    # Fallback: caller passed an output buffer that doesn't match our
+    # write contract (different dtype, non-contiguous, etc.).  Copy with
+    # implicit dtype cast.
+    output.copy_(out)
+    return None

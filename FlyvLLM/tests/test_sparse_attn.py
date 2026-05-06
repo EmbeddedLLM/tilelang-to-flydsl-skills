@@ -45,6 +45,57 @@ def test_sparse_attn_prefill_correctness(s_q, s_kv, h_q, d_qk, head_dim, topk):
 
 
 @pytest.mark.parametrize("s_q,s_kv,h_q,d_qk,head_dim,topk",
+                         [(8, 1024, 16, 576, 512, 512),
+                          (8, 2048, 16, 576, 512, 1024)],
+                         ids=["v4flash", "v4pro"])
+def test_sparse_attn_prefill_vllm_call_shape(s_q, s_kv, h_q, d_qk, head_dim, topk):
+    """Reproduces the exact tensor shapes vLLM passes at
+    ``deepseek_v4_attention.py:1026`` — kv reshaped to ``(s_kv, 1, d_qk)``
+    via ``kv.view(-1, 1, q.shape[-1])``.  The FlyDSL kernel was originally
+    written for 2-D kv and crashed inside MLIR with "Mismatched ranks in
+    slice" on the 3-D form."""
+    q, kv2d, idx, lens = _make_prefill_inputs(s_q, s_kv, h_q, d_qk, head_dim, topk)
+    kv3d = kv2d.view(-1, 1, d_qk)  # vLLM-shaped kv
+    scale = 1.0 / (d_qk ** 0.5)
+    sink = torch.randn(h_q, dtype=torch.float32, device="cuda") * 0.1
+    expected = rocm_ref_sparse_attn_prefill_torch(q, kv2d, idx, lens, scale, head_dim, sink)
+    out_buf = torch.full(
+        (s_q, h_q, head_dim), float("nan"),
+        dtype=torch.bfloat16, device="cuda",
+    )
+    ret = rocm_ref_sparse_attn_prefill_flydsl(
+        q, kv3d, idx, lens, scale, head_dim, sink, output=out_buf,
+    )
+    assert ret is None
+    torch.testing.assert_close(out_buf, expected, atol=1e-2, rtol=1e-2, equal_nan=True)
+
+
+@pytest.mark.parametrize("s_q,s_kv,h_q,d_qk,head_dim,topk",
+                         [(8, 128, 4, 192, 128, 32),
+                          (8, 1024, 16, 576, 512, 512),
+                          (8, 2048, 16, 576, 512, 1024)],
+                         ids=["v3_topk32", "v4flash", "v4pro"])
+def test_sparse_attn_prefill_direct_write(s_q, s_kv, h_q, d_qk, head_dim, topk):
+    """vLLM call style: caller passes a pre-allocated output buffer; the
+    kernel writes into it in place and returns None."""
+    q, kv, idx, lens = _make_prefill_inputs(s_q, s_kv, h_q, d_qk, head_dim, topk)
+    scale = 1.0 / (d_qk ** 0.5)
+    sink = torch.randn(h_q, dtype=torch.float32, device="cuda") * 0.1
+    expected = rocm_ref_sparse_attn_prefill_torch(q, kv, idx, lens, scale, head_dim, sink)
+    out_buf = torch.full(
+        (s_q, h_q, head_dim), float("nan"),
+        dtype=torch.bfloat16, device="cuda",
+    )
+    out_buf_id = out_buf.data_ptr()
+    ret = rocm_ref_sparse_attn_prefill_flydsl(
+        q, kv, idx, lens, scale, head_dim, sink, output=out_buf,
+    )
+    assert ret is None, "direct-write path must return None"
+    assert out_buf.data_ptr() == out_buf_id, "output buffer must be written in place"
+    torch.testing.assert_close(out_buf, expected, atol=1e-2, rtol=1e-2, equal_nan=True)
+
+
+@pytest.mark.parametrize("s_q,s_kv,h_q,d_qk,head_dim,topk",
                          [
                              # original V3-style config
                              (64, 1024, 8, 192, 128, 256),
